@@ -675,7 +675,7 @@ def get_vol_path(datastore, tenant_name=None):
     if tenant_name:
         error_info, tenant = auth_api.get_tenant_from_db(tenant_name)
         if error_info:
-            logging.error("get_vol_path: cannont find tenant info for tenant %s", tenant_name)
+            logging.error("get_vol_path: failed to find tenant info for tenant %s", tenant_name)
             path = dock_vol_path
         path = os.path.join(dock_vol_path, tenant.id)
     else:
@@ -750,7 +750,7 @@ def get_full_vol_name(vmdk_name, datastore):
     vol_name = vmdk_utils.strip_vmdk_extension(vmdk_name)
     logging.debug("get_full_vol_name: %s %s", vmdk_name, datastore)
     return "{0}@{1}".format(vol_name, datastore)
-    
+
 def datastore_path_exist(datastore_name):
     """ Check whether path /vmfs/volumes/datastore_name" exist or not """
     ds_path = os.path.join("/vmfs/volumes/", datastore_name)
@@ -780,7 +780,7 @@ def executeRequest(vm_uuid, vm_name, config_path, cmd, full_vol_name, opts):
     For VM, the function gets vm_uuid, vm_name and config_path
     <opts> is a json options string blindly passed to a specific operation
 
-    Returns None (if all OK) or error string 
+    Returns None (if all OK) or error string
     """
     logging.debug("config_path=%s", config_path)
     vm_datastore_url = vmdk_utils.get_datastore_url_from_config_path(config_path)
