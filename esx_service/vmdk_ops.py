@@ -656,11 +656,11 @@ def attachVMDK(vmdk_path, vm_uuid):
 
 
 # Return error, or None for OK.
-def detachVMDK(vmdk_path, vm_uuid):
+def detachVMDK(full_vol_name, vm_uuid):
     vm = findVmByUuid(vm_uuid)
     logging.info("*** detachVMDK: %s from %s VM uuid = %s",
-                 vmdk_path, vm.config.name, vm_uuid)
-    return disk_detach(vmdk_path, vm)
+                 full_vol_name, vm.config.name, vm_uuid)
+    return disk_detach(full_vol_name, vm)
 
 
 # Check existence (and creates if needed) the path for docker volume VMDKs
@@ -786,9 +786,23 @@ def executeRequest(vm_uuid, vm_name, config_path, cmd, full_vol_name, opts):
     vm_datastore_url = vmdk_utils.get_datastore_url_from_config_path(config_path)
     vm_datastore = get_datastore_name(vm_datastore_url)
 
+    # Detach is implicity allowed if a disk has been attached
+    # Do not find tenant or privileges; just detach the disk
+    if cmd == "detach":
+        with lockManager.get_lock(vm_uuid):
+            response = detachVMDK(full_vol_name, vm_uuid)
+
+        return response
+
     error_info, tenant_uuid, tenant_name = auth.get_tenant(vm_uuid)
     if error_info:
-        return err(error_info)
+        # For docker volume ls, docker prints a list of cached volume names in case
+        # of error(in this case, orphan VM).
+        # Explicity providing empty list of volumes to avoid misleading output.
+        if cmd == "list":
+            return []
+        else:
+            return err(error_info)
     if tenant_name == auth_data_const.DEFAULT_TENANT:
         # for DEFAULT tenant, set default_datastore to vm_datastore
         default_datastore_url = vm_datastore_url
@@ -875,9 +889,6 @@ def executeRequest(vm_uuid, vm_name, config_path, cmd, full_vol_name, opts):
         elif cmd == "attach":
             with lockManager.get_lock(vm_uuid):
                 response = attachVMDK(vmdk_path, vm_uuid)
-        elif cmd == "detach":
-            with lockManager.get_lock(vm_uuid):
-                response = detachVMDK(vmdk_path, vm_uuid)
         else:
             return err("Unknown command:" + cmd)
 
@@ -935,8 +946,12 @@ def get_datastore_names_list():
     """returns names of known datastores"""
     return [i[0] for i in vmdk_utils.get_datastores()]
 
-def findDeviceByPath(vmdk_path, vm):
-    logging.debug("findDeviceByPath: Looking for device {0}".format(vmdk_path))
+def findDeviceByName(vol_name, vm):
+    """
+    Scan the list of attached devices to the VM to find a disk with name vol_name
+    If found, return the device as well as the path
+    """
+    logging.debug("findDeviceByName: Looking for device with name {0}".format(vol_name))
     for d in vm.config.hardware.device:
         if type(d) != vim.vm.device.VirtualDisk:
             continue
@@ -950,20 +965,18 @@ def findDeviceByPath(vmdk_path, vm):
         ds, disk_path = d.backing.fileName.rsplit("]", 1)
         datastore = ds[1:]
         backing_disk = disk_path.lstrip()
-        logging.debug("findDeviceByPath: datastore=%s, backing_disk=%s", datastore, backing_disk)
+        backing_disk_name = vmdk_utils.strip_vmdk_extension(os.path.basename(backing_disk))
 
-        # Construct the parent dir and vmdk name, resolving
-        # links if any.
-        dvol_dir = os.path.dirname(vmdk_path)
-        datastore_prefix = os.path.realpath(os.path.join("/vmfs/volumes", datastore)) + '/'
-        real_vol_dir = os.path.realpath(dvol_dir).replace(datastore_prefix, "")
-        virtual_disk = os.path.join(real_vol_dir, os.path.basename(vmdk_path))
-        logging.debug("dvol_dir=%s datastore_prefix=%s real_vol_dir=%s", dvol_dir, datastore_prefix,real_vol_dir)
-        logging.debug("backing_disk=%s virtual_disk=%s", backing_disk, virtual_disk)
-        if virtual_disk == backing_disk:
-            logging.debug("findDeviceByPath: MATCH: %s", backing_disk)
-            return d
-    return None
+        logging.debug("findDeviceByName: datastore = %s, backing_disk_name = %s",
+                        datastore, backing_disk_name)
+
+        if backing_disk_name == vol_name:
+            logging.debug("findDeviceByName: MATCH: %s", vol_name)
+            # Need the vmdk path to update the status in KV
+            datastore_prefix = os.path.realpath(os.path.join("/vmfs/volumes", datastore)) + '/'
+            return d, os.path.join(datastore_prefix, backing_disk)
+
+    return None, None
 
 # Find the PCI slot number
 def get_controller_pci_slot(vm, pvscsi, key_offset):
@@ -1071,7 +1084,8 @@ def handle_stale_attach(vmdk_path, kv_uuid):
           if cur_vm.runtime.powerState == VM_POWERED_OFF:
              logging.info("Detaching disk %s from VM(powered off) - %s\n",
                              vmdk_path, cur_vm.config.name)
-             device = findDeviceByPath(vmdk_path, cur_vm)
+             vol_name = vmdk_utils.strip_vmdk_extension(os.path.basename(vmdk_path))
+             device, vmdk_path_existing = findDeviceByName(vol_name, cur_vm)
              if device:
                 msg = disk_detach_int(vmdk_path, cur_vm, device)
                 if msg:
@@ -1199,7 +1213,8 @@ def disk_attach(vmdk_path, vm):
 
     # Check if this disk is already attached, and if it is - skip the disk
     # attach and the checks on attaching a controller if needed.
-    device = findDeviceByPath(vmdk_path, vm)
+    vol_name = vmdk_utils.strip_vmdk_extension(os.path.basename(vmdk_path))
+    device, vmdk_path_existing = findDeviceByName(vol_name, vm)
     if device:
         # Disk is already attached.
         logging.warning("Disk %s already attached. VM=%s",
@@ -1213,7 +1228,6 @@ def disk_attach(vmdk_path, vm):
         return dev_info(device.unitNumber,
                         get_controller_pci_slot(vm, pvsci[0],
                                                 offset_from_bus_number))
-
 
     # Disk isn't attached, make sure we have a PVSCI and add it if we don't
     # check if we already have a pvsci one
@@ -1297,16 +1311,20 @@ def err(string):
     return {u'Error': string}
 
 
-def disk_detach(vmdk_path, vm):
-    """detach disk (by full path) from a vm amd return None or err(msg)"""
+def disk_detach(full_vol_name, vm):
+    """detach disk (by full_vol_name) from a vm and return None or err(msg)"""
 
-    device = findDeviceByPath(vmdk_path, vm)
+    try:
+        vol_name, datastore = parse_vol_name(full_vol_name)
+    except ValidationError as ex:
+        return err(str(ex))
 
+    device, vmdk_path = findDeviceByName(vol_name, vm)
     if not device:
        # Could happen if the disk attached to a different VM - attach fails
        # and docker will insist to sending "unmount/detach" which also fails.
-       msg = "*** Detach failed: disk={0} not found. VM={1}".format(
-       vmdk_path, vm.config.uuid)
+       msg = "*** Detach failed: disk with name {0} not found. VM={1}".format(
+       vol_name, vm.config.uuid)
        logging.warning(msg)
        return err(msg)
 

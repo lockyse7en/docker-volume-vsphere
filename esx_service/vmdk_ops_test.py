@@ -559,8 +559,7 @@ class VmdkAttachDetachTestCase(unittest.TestCase):
         for id in range(1, self.max_vol_count + 1):
             volName = 'VmdkAttachDetachTestVol' + str(id)
             fullpath = os.path.join(self.datastore_path, volName + '.vmdk')
-            ret = vmdk_ops.disk_detach(vmdk_path=fullpath,
-                                       vm=vm[0])
+            ret = vmdk_ops.disk_detach(volName, vm=vm[0])
             self.assertTrue(ret is None)
 
 class VmdkAuthorizeTestCase(unittest.TestCase):
