@@ -75,7 +75,7 @@ class TestVmdkopsAdminSanity(unittest.TestCase):
 
     def test_config(self):
         """ check command presence"""
-        cmds = ["", "remove", "init", "move"]
+        cmds = ["", "rm", "init", "mv"]
         for c in cmds:
             cmd = '{} config {} -h'.format(ADMIN_CLI, c)
             # Ignoring output as long as there are no failures

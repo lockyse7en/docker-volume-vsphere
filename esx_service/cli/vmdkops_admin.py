@@ -19,6 +19,7 @@ import argparse
 import os
 import subprocess
 import sys
+import signal
 import os.path
 import shutil
 
@@ -35,8 +36,9 @@ import log_config
 import auth
 import auth_data_const
 import convert
-import auth_data
 import auth_api
+import auth_data
+from auth_data import DB_REF
 
 NOT_AVAILABLE = 'N/A'
 UNSET = "Unset"
@@ -440,10 +442,10 @@ def commands():
             'cmds': {
                 'init': {
                     'func': config_init,
-                    'help': "Init Config DB to allows quotas and access groups (vm-groups)",
+                    'help': 'Init ' + DB_REF + ' to allows quotas and access groups (vm-groups)',
                     'args': {
                         '--datastore': {
-                            'help': 'Config DB will be placed on a shared datastore',
+                            'help': DB_REF + ' will be placed on a shared datastore',
                         },
                         '--local': {
                             'help': 'Allows local (SingleNode) Init',
@@ -455,31 +457,28 @@ def commands():
                         }
                     }
                 },
-                'remove': {
+                'rm': {
                     'func': config_rm,
-                    'help': 'Remove Config DB',
+                    'help': 'Remove ' + DB_REF,
                     'args': {
-                        '--datastore': {
-                            'help': 'Remove Config DB from a specific datastore',
-                        },
                         '--local': {
-                            'help': 'Removes only local link or local DB',
+                            'help': 'Remove only local link or local DB',
                             'action': 'store_true'
                         },
                         '--no-backup': {
                             'help': 'Do not create DB backup before removing',
                             'action': 'store_true'
                         },
-                        '--force': {
-                            'help': 'Force operation, ignore warnings',
+                        '--confirm': {
+                            'help': 'Explicitly confirm the operation',
                             'action': 'store_true'
                         }
                     }
 
                 },
-                'move': {
+                'mv': {
                     'func': config_mv,
-                    'help': "Relocate config DB from its current location [not supported yet]",
+                    'help': 'Relocate ' + DB_REF + ' from its current location [not supported yet]',
                     'args': {
                         '--force': {
                             'help': 'Force operation, ignore warnings',
@@ -495,7 +494,13 @@ def commands():
         },
         'status': {
             'func': status,
-            'help': 'Show the status of the vmdk_ops service'
+            'help': 'Show the status of the vmdk_ops service',
+            'args': {
+                '--fast': {
+                    'help': 'Skip some of the data collection (port, version)',
+                    'action': 'store_true'
+                }
+            }
         }
     }
 
@@ -791,33 +796,35 @@ def policy_update(args):
 def status(args):
     """Prints misc. status information. Returns an array of 1 element dicts"""
     result = []
-    result.append({"Version": str(get_version())})
-    (status, pid) = get_service_status()
-    result.append({"Status": str(status)})
+    # version is extracted from localcli... slow...
+    version = "?" if args.fast else str(get_version())
+    result.append({"Version": version})
+    (service_status, pid) = get_service_status()
+    result.append({"Status": str(service_status)})
     with auth_data.AuthorizationDataManager() as auth:
         auth.connect()
         for (k, v) in auth.get_info().items():
             result.append({k: v})
         # TODO: print more stuff (link, DB, DS type, counts of object)
-        # TODO: add this print to be called from status() as well
     if pid:
         result.append({"Pid": str(pid)})
-        result.append({"Port": str(get_listening_port(pid))})
+        port = "?" if args.fast else str(get_listening_port(pid))
+        result.append({"Port": port})
     result.append({"LogConfigFile": log_config.LOG_CONFIG_FILE})
     result.append({"LogFile": log_config.LOG_FILE})
     result.append({"LogLevel": log_config.get_log_level()})
     for r in result:
         print("{}: {}".format(r.keys()[0], r.values()[0]))
-    return result
+    return None
 
 
 def set_vol_opts(args):
     try:
         set_ok = vmdk_ops.set_vol_opts(args.volume, args.vm_group, args.options)
         if set_ok:
-           print('Successfully updated settings for : {0}'.format(args.volume))
+            print('Successfully updated settings for : {0}'.format(args.volume))
         else:
-           print('Failed to update {0} for {1}.'.format(args.options, args.volume))
+            print('Failed to update {0} for {1}.'.format(args.options, args.volume))
     except Exception as ex:
         print('Failed to update {0} for {1} - {2}.'.format(args.options,
                                                            args.volume,
@@ -1115,17 +1122,18 @@ def create_db_symlink(path, link_path):
     try:
         os.symlink(path, link_path)
     except Exception as ex:
-        print("Failed to create symlink at {} to {}".format(auth_data.AUTH_DB_PATH, path))
+        print("Failed to create symlink at {} to {}".format(link_path, path))
         sys.exit(ex)
 
 
 def db_move_to_backup(path):
     """Saves a DB copy side by side. Basically, glorified copy"""
-    print("Warning: full DB backup is not implemented yet. Copying {} to .bck".format(path))
+    suffix = ".bak"
+    print("Warning: full DB backup is not implemented yet. Copying {} to {}".format(path, suffix))
     #TODO:
-    # - get a name as path.bck-date
+    # - get a name as path.bak-date
     # - copy a file, yell if it's problem (just FYI)
-    shutil.move(path, path + ".bck")
+    shutil.move(path, path + suffix)
     return
 
 
@@ -1140,15 +1148,13 @@ def is_local_vmfs(datastore_name):
     return False
 
 
-def service_restart():
-    """Brute force restart the service, it does need it."""
-    # Note1: iNotify in the service would be better bu iNotify is only supported
-    # in ESX user space in 6.5+ (TBD: verify & file an issue).
-    print("Restarting the vmdkops service to pick up new configuration")
-    os.system("/etc/init.d/vmdk-opsd restart")
+def service_reset():
+    """Send a signal to the service to restart itself"""
+    (status, pid) = get_service_status()
+    if pid:
+        os.kill(int(pid), signal.SIGUSR1)
+    return None
 
-
-# TODO - rename local functions to __* or hide in config_init
 
 def err_override(_msg, _info):
     """A helper to form help messages - adds Error: and some extra info"""
@@ -1157,14 +1163,16 @@ def err_override(_msg, _info):
     print(msg)
     return msg
 
-def err_out(_msg):
+def err_out(_msg, _info=None):
     "another trivial helper - print a message and return it"
     print(_msg)
+    if _info:
+        print("\nAdditional information: {}".format(_info))
     return _msg
 
 def config_elsewhere(datastore):
     """Returns a list of config DBs on other datastore, or None if None exists"""
-    # TODO - actual implementation: scan vim datastores, check for dockvol/file_name
+    # TODO - Actual implementation: scan vim datastores, check for dockvols/file_name
     #  return None or [list of config DBs]
     if datastore == 'Some':
         return [datastore] # trick pylint until we implement the code
@@ -1180,10 +1188,9 @@ def check_ds_local_args(args):
     if args.datastore and args.local:
         return err_out("Error: only one of '--datastore' or '--local' can be set")
     if args.datastore:
-        #TODO: check datastore argument is valid (we already have a code somewhere)
+        #TODO: Check datastore argument is valid (we already have a code somewhere).
         pass
     return None
-
 
 
 def config_init(args):
@@ -1199,14 +1206,14 @@ def config_init(args):
     if args.datastore:
         ds_name = args.datastore
         db_path = auth_data.AuthorizationDataManager.ds_to_db_path(ds_name)
-        # check that the target datastore is NOT local VMFS, bail out if it is (--force to overide)
+        # Check that the target datastore is NOT local VMFS, bail out if it is (--force to overide).
         if is_local_vmfs(ds_name) and not args.force:
-            return err_override("{} is a local datastore.".format(ds_name) +
+            return err_override("Warning: {} is a local datastore.".format(ds_name) +
                                 "Shared datastores are recommended.", "N/A")
-        # Check other datastores, bail out if dockvold/DB exists there.
+        # Check other datastores, bail out if dockvols/DB exists there.
         other_ds_config = config_elsewhere(ds_name)
         if other_ds_config and not args.force:
-            return err_override("Configuration is already inited: {}".format(other_ds_config), "N/A")
+            return err_override("Warning: another " + DB_REF + " is already inited {}".format(other_ds_config), "N/A")
     else:
         db_path = auth_data.AUTH_DB_PATH
 
@@ -1225,20 +1232,12 @@ def config_init(args):
         except auth_data.DbAccessError as ex:
             return err_out("Fatal: DB link or DB is corrupted. Check {} ({}".format(link_path, ex))
 
-    if auth.mode  == auth_data.DBMode.NotConfigured:
+    if auth.mode == auth_data.DBMode.NotConfigured:
         pass
-    elif auth.mode  == auth_data.DBMode.MultiEsx:
-        if not args.force:
-            return err_override("Config DB is already initialized.", info)
-        else:
-            os.remove(link_path)
-    elif auth.mode  == auth_data.DBMode.SingleNode:
-        if not args.force:
-            return err_override("Local DB already exists {}".format(link_path), info)
-        db_move_to_backup(link_path)
+    elif auth.mode == auth_data.DBMode.MultiNode or auth.mode == auth_data.DBMode.SingleNode:
+        return err_out(DB_REF + " is already initialized.", info)
     else:
-        raise Exception("Fatal: Internal error - unknown mode (value %s)" % auth.mode )
-
+        raise Exception("Fatal: Internal error - unknown mode (value %s)" % auth.mode)
 
     if not os.path.exists(db_path):
         print("Creating new DB at {}".format(db_path))
@@ -1251,74 +1250,63 @@ def config_init(args):
     if not args.local:
         print("Creating a symlink to DB at {}".format(link_path))
         create_db_symlink(db_path, link_path)
-    service_restart()
-    return None
+
+    return service_reset()
 
 
 def config_rm(args):
     """
-    Remove Config DB.BaseException
+    Remove Local Config DB or local link.
     :return: None for success, string for error
     """
 
-    # TODO
-    # This command should ask for double confirmation, reset the DB_PATH,
-    # and delete the database instance
-    # Other ESXs will detect this change (DB is missing) and
-    # reset the DB_PATH (if new DB cannot be discovered)
+    # This asks for double confirmation, and removes the local link or DB (if any)
+    # NEVER deletes the shared database - instead prints help
 
-    err = check_ds_local_args(args)
-    if err:
-        return err
+    if not args.local:
+        return err_out("""
+        Shared DB removal is not supported. For removing  local configuration, use --local flag.
+        For removing shared DB,  run 'vmdkops_admin config rm --local' on ESX hosts using this DB,
+        and manually remove the {} file from shared storage.
+        """.format(auth_data.CONFIG_DB_NAME))
 
-    if not args.force:
-        return err_out("Warning: Config DB removal requires '--force' flag to execute the request")
+    if not args.confirm:
+        return err_out("Warning: For extra safety, removal operation requires '--confirm' flag.")
 
-    if args.datastore:
-        db_path = auth_data.AuthorizationDataManager.ds_to_db_path(args.datastore)
-
-    link_path = auth_data.AUTH_DB_PATH # where was the DB, now is a link
-
-
-    try:
-        os.remove(link_path)
-    except Exception as ex:
-        return err_out("Configuration rm failed ({})".format(ex))
-    print("Removed {}".format(link_path))
-
-    if args.local:
+    link_path = auth_data.AUTH_DB_PATH # local DB or link
+    if not os.path.exists(link_path):
         return None
 
-    if args.no_backup:
-        os.remove(db_path)
-    else:
-        db_move_to_backup(db_path)
+    print("Removing {}".format(link_path))
+    try:
+        if args.no_backup:
+            db_move_to_backup(link_path)
+        else:
+            os.remove(link_path)
+    except Exception as ex:
+        print(" Failed to remove {} found ({})".format(link_path, ex))
 
-    service_restart()
-    return None
+    return service_reset()
 
 
 def config_mv(args):
-    """
-    Relocate config DB from its current location [not supported yet]
+    """[Not Supported Yet]
+    Relocate config DB from its current location
     :return: None for success, string for error
     """
 
     if not args.force:
-        return err_out("Config DB Move to {} ".format(args.to) +
+        return err_out(DB_REF + " move to {} ".format(args.to) +
                        "requires '--force' flag to execute the request.")
 
-    # TODO: question
-    # Should it work only in MultiEsx mode (link and DB exist), should fail in all other modes ?
-
     # TODO:
-    # check the mode and reject the move if its not MultiEsx
+    # this is pure convenience code, so it  is very low priority; still, here are the steps:
     # checks if target exists upfront, and fail if it does
-    # stop service
-    # mv the DB instance 'to' , and flip the symlink.
-    # restart service
-    # need --dryrun or --yes
+    # cp the DB instance 'to' , and flip the symlink.
+    # refresh service (not really needed as next vmci_command handlers will pick it up)
+    # need --dryrun or --confirm
     # issue: works really with discovery only , as others need to find it out
+
     print("Sorry, configuration move ('config mv' command) is not supported yet")
     return None
 

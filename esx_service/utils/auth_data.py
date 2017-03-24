@@ -50,21 +50,22 @@ UPGRADE_README = "https://github.com/vmware/docker-volume-vsphere/blob/master/do
 
 class DBMode(object):
     """
-    Modes of Aut DB. Calculated on first access and used to make decisions
-    about the need for authentication. Also will be used in changes discovery (TBD)
+    Modes of Auth DB. Calculated on first access and used to make decisions
+    about the need for authentication.
+    TODO: Also will be used in changes discovery.
     """
 
     Unknown = 0        # The value was not calculated yet
     NotConfigured = 1  # path does not exist, or an empty DB (which we delete)
                        # this turn on "no access control" mode for external code
     SingleNode = 2     # path exists and is a non-empty DB. "legacy singe ESX" mode
-    MultiEsx = 3       # Normal op, symlink to nonempty DB.
+    MultiNode = 3      # Normal op, symlink to nonempty DB. Used for a DB on shared storage,
     BrokenLink = 4     # symlink exists but points nowhere, or it's a file which is not the DB
     str_dict = {       # strings for print when requested:
         Unknown: "Unknown (not checked yet)",
-        NotConfigured: "NotConfigured (no local DB or symlink)",
+        NotConfigured: "NotConfigured (no local DB, no symlink to shared DB)",
         SingleNode: "SingleNode (local DB exists)",
-        MultiEsx: "MultiEsx (local symlink pointing to shared DB)",
+        MultiNode: "MultiNode (local symlink pointing to shared DB)",
         BrokenLink: "BrokenLink (Broken link or corrupted DB file)"
     }
     def __init__(self, value=Unknown):
@@ -457,7 +458,7 @@ class AuthorizationDataManager:
         return self
 
     def __exit__(self, exception_type, exception_value, traceback):
-        """Support for 'with'statement"""
+        """Support for 'with' statement"""
         pass
 
     def __close(self):
@@ -473,8 +474,8 @@ class AuthorizationDataManager:
         """
         major_ver = minor_ver = 0
 
-        # check if  "versions" exists
-        # if table "versions" does not exist, return major_ver=0 and minor_ver=0
+        # Check if "versions" exists.
+        # If table "versions" does not exist, return major_ver=0 and minor_ver=0.
         try:
             cur = self.conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' and name = 'versions';")
             result = cur.fetchall()
@@ -483,7 +484,7 @@ class AuthorizationDataManager:
             return str(e), major_ver, minor_ver
 
         if not result:
-        # table "versions" does not exist
+        # Table "versions" does not exist.
             return None, major_ver, minor_ver
 
         try:
@@ -595,10 +596,10 @@ class AuthorizationDataManager:
         """
 
 
-        logging.info("Running DB mode discovery for %s", self.db_path)
+        logging.info("Checking DB mode for %s...", self.db_path)
         # check if the path exists (without following symlinks)
         if not os.path.lexists(self.db_path):
-            logging.debug(DB_REF + "does not exist. mode NotConfigured")
+            logging.info(DB_REF + "does not exist. mode NotConfigured")
             return DBMode.NotConfigured
 
         if not os.path.exists(self.db_path):
@@ -610,7 +611,7 @@ class AuthorizationDataManager:
 
         # it's a single node config file. Check if the DB is empty so we can drop it.
         if not os.path.islink(self.db_path):
-            logging.debug(DB_REF + "exists and has modifications, mode->SingleNode")
+            logging.info(DB_REF + "exists and has modifications, mode SingleNode")
             return DBMode.SingleNode
 
         # let's check if the db content seems good
@@ -619,8 +620,8 @@ class AuthorizationDataManager:
             logging.error(DB_REF + "Location {}, error: {}".format(self.db_path, err))
             return DBMode.BrokenLink
 
-        logging.debug(DB_REF + "found. maj_ver={} min_ver={} mode->MultiEsx".format(major, minor))
-        return DBMode.MultiEsx
+        logging.info(DB_REF + "found. maj_ver={} min_ver={} mode MultiNode".format(major, minor))
+        return DBMode.MultiNode
 
     def allow_all_access(self):
         """Allow all access if we are in NotConfigured mode"""
@@ -632,12 +633,17 @@ class AuthorizationDataManager:
 
     def get_info(self):
         """Returns a dict with useful info for misc. status commands"""
-        db_location = "n/a"
-        if os.path.islink(self.db_path):
+
+        link_location = db_location = "N/A"
+        if self.mode == DBMode.MultiNode:
             db_location = os.readlink(self.db_path)
-        elif os.path.exists(self.db_path):
-            db_location = self.db_path
-        return {"DB_Mode": str(self.mode), "DB_LocalPath": self.db_path, "DB_SharedLocation": db_location}
+            link_location = self.db_path
+        elif self.mode == DBMode.SingleNode:
+            link_location = self.db_path
+
+        return {"DB_Mode": str(self.mode),
+                "DB_LocalPath": link_location,
+                "DB_SharedLocation": db_location}
 
     def __err_config_init_needed(self):
         """Return standard error msg for NotConfigured mode"""
@@ -647,7 +653,7 @@ class AuthorizationDataManager:
     def db_is_empty(self):
         """
         Returns true if the DB only has default tables and no custom content
-        Assumes the DB is already connected to (i.e. exists and has defaut content)
+        Assumes the DB is already connected to (i.e. exists and has default content)
         """
         if not self.conn:
             logging.error("Internal error: no connection in db_is_empty %s", self.db_path)

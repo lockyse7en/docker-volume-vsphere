@@ -15,6 +15,9 @@ The admin CLI also enables ESX admins to implement access control and basic stor
 
 Admin CLI is located at `/usr/lib/vmware/vmdkops/bin/vmdkops_admin.py`. It supports `--help`  at
 every command and sub-command. e.g.
+
+**NOTE** PXE Boot of ESX host is not supported, as the code relies on DB (or symlink) being in /etc/vwmware/vmdksops/auth-db. If the host is PXE  booted, access control will be turned off, as the code will interpret the lack of DB or link at the above address as an instruction to provide no access control.
+
 ```
 [root@localhost:~] alias vmdkops_admin=/usr/lib/vmware/vmdkops/bin/vmdkops_admin.py
 [root@localhost:~] vmdkops_admin --help
@@ -61,7 +64,7 @@ of their usage.
 
 ## Vm-group
 
-vm-groups allow placing access control restrictions on all Docker storage requests issued from a group of VMs. Administrator can create a vm-group, place a set of VMs in it (`create` and ``vm add`` subcommands, and then associate this group with a specific set of Datastore and access privileges (`access` and `update` subcommands).
+vm-groups allow placing access control restrictions on all Docker storage requests issued from a group of VMs. Administrator can create a vm-group, place a set of VMs in it (`create` and ``vm add`` subcommands, and then associate this group with a specific set of Datastores and access privileges (`access` and `update` subcommands).
 
 ### Help
 ```bash
@@ -685,7 +688,7 @@ This operation may take a while. Please be patient.
 Successfully updated policy: some-policy
 ```
 
-#### Remove
+#### Remove  (`rm`)
 
 Remove a VSAN storage policy. Note that a storage policy cannot be removed if it is currently in use
 by one or more virtual disks.
@@ -701,15 +704,15 @@ Successfully removed policy: some-policy
 
 ## Config
 
-Creates, removes, moves and reports on status of config DB. Config DB keep authentication information, and without initializing it no access control is supported. Also, configuring access control will fail, e.g.
+Creates, removes, moves and reports on status of config DB. Config DB keeps authentication information, and without initializing it no access control is supported. Also, configuring access control will fail, e.g.
 ```
-[root@localhost:~] vmdkops_admin  vm-group create --name MY
+[root@localhost:~] vmdkops_admin vm-group create --name MY
 Internal Error(Error: Please init configuration in vmdkops_admin before trying to change it)
 ```
 
-#### Init
+#### Init (`config init`)
 
-Initialized the config is optional. If the config is not initialized, there will be no access control and all `vm-group` commands will fail with appropriate messages.
+Initializing the config is optional. If the config is not initialized, there will be no access control and all `vm-group` commands will fail with appropriate messages.
 
 Before configuring access control or quotas, the config needs to be inited to either local (`init --local`) or shared (`init --datastore=ds_name) mode
 
@@ -763,23 +766,20 @@ LogLevel: DEBUG
 ```
 
 
-#### Remove
+#### Remove (`config rm`)
 
-Allows to remove configuration. Either `--local` or `--datastore` flag needs to be passed.
-Also to make sure it is not typed accidentally, the command requires `--force` flag to actually execute the request
+Allows to remove local configuration DB. Since this is a destructive operation, admin neeeds to type both `--local` flg (to confirm it's local only opertion and does not impact shared database, if any) , and `--confirm` flag to cofirm that she actually wants to delete the local configuration DB.
+
+Running `vmdkops_admin config rm ` with no flags prints an explanation on how to remove the shared config DB, if any.
 
 ```
-[root@localhost:~] vmdkops_admin config remove -h
-usage: vmdkops_admin.py config remove [-h] [--local] [--no-backup] [--force]
-                                      [--datastore DATASTORE]
+usage: vmdkops_admin.py config rm [-h] [--local] [--no-backup] [--confirm]
 
 optional arguments:
-  -h, --help            show this help message and exit
-  --local               Removes only local link or local DB
-  --no-backup           Do not create DB backup before removing
-  --force               Force operation, ignore warnings
-  --datastore DATASTORE
-                        Remove Config DB from a specific datastore
+  -h, --help   show this help message and exit
+  --local      Remove only local link or local DB
+  --no-backup  Do not create DB backup before removing
+  --confirm    Explicitly confirm the operation
 ```
 
 
@@ -787,23 +787,58 @@ optional arguments:
 
 To get config DB  status, use  `/usr/lib/vmware/vmdkops/bin/vmdkops_admin.py status` command.
 
-#### Move
+#### Move (`config mv`)
 
-Allows to relocate config DB between datastores. [Not implemented yet]
+[Not implemented yet] Allows to relocate config DB between datastores.
+
 ## Status
 
 Show config and run-time information about the service.
 
+```
+[root@localhost:~] /usr/lib/vmware/vmdkops/bin/vmdkops_admin.py status  -h
+usage: vmdkops_admin.py status [-h] [--fast]
+
+optional arguments:
+  -h, --help  show this help message and exit
+  --fast      SKip some of the data collection (port, version)
+  ```
+
+
 ```bash
-[root@localhost:~]  /usr/lib/vmware/vmdkops/bin/vmdkops_admin.py status
-Version: 0.12.fea683a-0.0.1
+[root@localhost:~] time /usr/lib/vmware/vmdkops/bin/vmdkops_admin.py status
+Version: 0.12.0afa0ec-0.0.1
 Status: Running
 DB_LocalPath: /etc/vmware/vmdkops/auth-db
-DB_SharedLocation: /etc/vmware/vmdkops/auth-db
+DB_SharedLocation: N/A
 DB_Mode: SingleNode (local DB exists)
-Pid: 5979684
+Pid: 6298936
 Port: 1019
 LogConfigFile: /etc/vmware/vmdkops/log_config.json
 LogFile: /var/log/vmware/vmdk_ops.log
 LogLevel: DEBUG
+
+real	0m 2.01s
+user	0m 0.59s
+sys	0m 0.00s
+```
+
+ Some of the information retrieval may be slow (e.g. VIB version (`Version` field) # or VMCI port number (`Port` field). `--fast` flag skips slow data collection and prints `?` for fields with no information.
+
+```bash
+[root@localhost:~] time /usr/lib/vmware/vmdkops/bin/vmdkops_admin.py status --fast
+Version: ?
+Status: Running
+DB_LocalPath: /etc/vmware/vmdkops/auth-db
+DB_SharedLocation: N/A
+DB_Mode: SingleNode (local DB exists)
+Pid: 6298936
+Port: ?
+LogConfigFile: /etc/vmware/vmdkops/log_config.json
+LogFile: /var/log/vmware/vmdk_ops.log
+LogLevel: DEBUG
+
+real	0m 0.72s
+user	0m 0.51s
+sys	0m 0.00s
 ```
